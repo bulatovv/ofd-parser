@@ -1,7 +1,7 @@
 import glob
 import email
 from email.message import Message
-from typing import Generator
+from typing import Generator, Callable, Iterable
 from dataclasses import dataclass
 
 
@@ -18,8 +18,9 @@ class HtmlWithAltContent:
     content: HtmlContent
     alt_content: PlaintextContent
 
+Content = HtmlContent | PlaintextContent | HtmlWithAltContent
 
-def parse_content_tree(message: Message) -> Generator[HtmlContent | PlaintextContent | HtmlWithAltContent, None, None]:
+def parse_content_tree(message: Message) -> Generator[Content, None, None]:
     match message.get_content_type():
         case 'multipart/mixed' | 'multipart/related':
             yield from (
@@ -28,19 +29,33 @@ def parse_content_tree(message: Message) -> Generator[HtmlContent | PlaintextCon
                 for content in parse_content_tree(subpart)
             )
         case 'multipart/alternative':
-            first, second = message.get_payload()
-            
-            if first.get_content_type() == 'text/plain': # type: ignore
-                first, second = second, first
+            payload: list[Message] = message.get_payload() # type: ignore
+            assert 0 < len(payload) <= 2, f"Unsupported multipart/alternative payload length: {len(payload)}"
 
-            # extract first html node
-            first = next(
-                parse_content_tree(first) # type: ignore
-            )
+            if len(payload) == 1:
+                yield from parse_content_tree(payload[0])
+            else:
+                first = find_by(
+                    parse_content_tree(payload[0]), lambda c: isinstance(c, HtmlContent | PlaintextContent)
+                )
 
-            yield HtmlWithAltContent(first, second) # type: ignore
+                if isinstance(first, HtmlContent):
+                    html = first
+                    plaintext = find_by(
+                        parse_content_tree(payload[1]), lambda c: isinstance(c, PlaintextContent)
+                    )
+                else:
+                    plaintext = first
+                    html = find_by(
+                        parse_content_tree(payload[1]), lambda c: isinstance(c, HtmlContent)
+                    )
 
-
+                if html and plaintext:
+                    yield HtmlWithAltContent(html, plaintext)
+                elif html:
+                    yield html
+                elif plaintext:
+                    yield plaintext
         case 'text/plain':
             data = message.get_payload(decode=True)
             assert isinstance(data, bytes)
@@ -51,11 +66,8 @@ def parse_content_tree(message: Message) -> Generator[HtmlContent | PlaintextCon
             yield HtmlContent(data.decode(errors='ignore'))
 
 
-        
-
-
-
-
+def find_by[T](seq: Iterable[T], pred: Callable[[T], bool]) -> T | None:
+    return next((item for item in seq if pred(item)), None)
 
 
 # Get a list of all the .eml files in the directory
